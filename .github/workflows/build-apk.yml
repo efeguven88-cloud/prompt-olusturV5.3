@@ -1,0 +1,145 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Bagimliliklari kur
+        run: npm install
+
+      - name: Android projesini olustur
+        run: npx cap add android
+
+      - name: Ust ve alt cubuklari uygulama rengine boya
+        run: |
+          cat > android/app/src/main/java/com/efe/promptolustur/MainActivity.java <<'JAVAEOF'
+          package com.efe.promptolustur;
+
+          import android.app.Activity;
+          import android.graphics.Color;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.Window;
+          import android.webkit.JavascriptInterface;
+          import androidx.core.view.WindowCompat;
+          import androidx.core.view.WindowInsetsControllerCompat;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getBridge().getWebView().addJavascriptInterface(new BarsBridge(this), "AndroidBars");
+              }
+
+              public static class BarsBridge {
+                  private final Activity activity;
+
+                  public BarsBridge(Activity activity) {
+                      this.activity = activity;
+                  }
+
+                  @JavascriptInterface
+                  public void set(final String hex, final boolean lightBackground) {
+                      activity.runOnUiThread(new Runnable() {
+                          @Override
+                          public void run() {
+                              try {
+                                  int color = Color.parseColor(hex);
+                                  Window window = activity.getWindow();
+                                  View decor = window.getDecorView();
+                                  decor.setBackgroundColor(color);
+                                  View content = activity.findViewById(android.R.id.content);
+                                  if (content != null) content.setBackgroundColor(color);
+                                  window.setStatusBarColor(color);
+                                  window.setNavigationBarColor(color);
+                                  WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, decor);
+                                  controller.setAppearanceLightStatusBars(lightBackground);
+                                  controller.setAppearanceLightNavigationBars(lightBackground);
+                              } catch (Exception ignored) {
+                              }
+                          }
+                      });
+                  }
+              }
+          }
+          JAVAEOF
+
+      - name: Uygulama ikonunu olustur
+        continue-on-error: true
+        run: npx --yes @capacitor/assets generate --android --iconBackgroundColor '#6a45f5'
+
+      - name: Web dosyalarini Android'e aktar
+        run: npx cap sync android
+
+      - name: Groq anahtarini uygulamaya ekle (istege bagli, sadece APK icin)
+        env:
+          GROQ_KEY: ${{ secrets.GROQ_KEY }}
+        run: |
+          if [ -n "$GROQ_KEY" ]; then
+            printf 'window.APP_GROQ_KEY=%s;\n' "$(printf '%s' "$GROQ_KEY" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read().strip()))')" > android/app/src/main/assets/public/config.js
+            echo "Groq anahtari APK'ya eklendi."
+          else
+            : > android/app/src/main/assets/public/config.js
+            echo "GROQ_KEY tanimli degil, anahtar uygulamada elle girilecek."
+          fi
+
+      - name: Sabit imza anahtarini hazirla (guncellemeler eski uygulamanin ustune kurulsun)
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p ~/.android
+            echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+            echo "Sabit imza anahtari kullanilacak."
+          else
+            echo "KEYSTORE_B64 tanimli degil, her derlemede farkli imza kullanilir."
+          fi
+
+      - name: APK derle
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: APK dosyasini yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Prompt-Olustur-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  # Ayni uygulamanin web surumunu ucretsiz bir baglantida yayinlar (GitHub Pages).
+  # Pages acik degilse bu is basarisiz olabilir; APK derlemesini etkilemez.
+  pages:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: www
+      - id: deployment
+        uses: actions/deploy-pages@v4
